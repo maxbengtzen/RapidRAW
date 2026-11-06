@@ -4,12 +4,14 @@ import CurveGraph from './Curves';
 import ColorPanel from './Color';
 import DetailsPanel from './Details';
 import EffectsPanel from './Effects';
+import FilmSimulationPanel from './FilmSimulation';
 import { ActiveTools } from '../../utils/adjustments';
 import { ToolVisibilityContext } from '../../context/ToolVisibilityContext';
 
 const SECTION_COMPONENTS: Record<string, any> = {
   basic: BasicAdjustments,
   curves: CurveGraph,
+  film: FilmSimulationPanel,
   color: ColorPanel,
   details: DetailsPanel,
   effects: EffectsPanel,

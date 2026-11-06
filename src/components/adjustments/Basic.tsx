@@ -46,6 +46,11 @@ const ToneMapperSwitch = ({
         label: t('adjustments.basic.mappers.agx'),
         title: t('adjustments.basic.mappers.agxDesc'),
       },
+      {
+        id: 'film',
+        label: t('adjustments.basic.mappers.film'),
+        title: t('adjustments.basic.mappers.filmDesc'),
+      },
     ],
     [t],
   );
