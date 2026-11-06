@@ -395,7 +395,8 @@ export interface Adjustments {
   structure: number;
   temperature: number;
   tint: number;
-  toneMapper: 'agx' | 'basic';
+  toneMapper: 'agx' | 'basic' | 'film';
+  filmSim: FilmSimSettings;
   transformDistortion: number;
   transformVertical: number;
   transformHorizontal: number;
@@ -553,10 +554,38 @@ export interface MaskContainer {
   visible: boolean;
 }
 
+export interface FilmSimSettings {
+  stock: string;
+  paper: string | null;
+  scanFilm: boolean;
+  filmExposure: number;
+  printExposure: number;
+  yellowShift: number;
+  magentaShift: number;
+  couplers: number;
+  grain: number;
+  halation: number;
+  autoExposure: boolean;
+  autoExposureMethod: string;
+  matchCameraBrightness: boolean;
+  filmFormat: number;
+  diffusionFilter: string;
+  diffusionStrength: number;
+}
+
+export interface FilmStock {
+  id: string;
+  name: string;
+  kind: 'negative' | 'positive' | 'print';
+  isBw: boolean;
+  targetPrint: string | null;
+}
+
 export interface Sections {
   [index: string]: Array<string>;
   basic: Array<string>;
   curves: Array<string>;
+  film: Array<string>;
   color: Array<string>;
   details: Array<string>;
   effects: Array<string>;
@@ -894,6 +923,7 @@ export interface AdjustmentGroup {
 export const ADJUSTMENT_GROUPS: Record<string, AdjustmentGroup[]> = {
   basic: [
     { label: 'adjustments.basic.toneMapper', keys: ['toneMapper'] },
+    { label: 'adjustments.film.title', keys: ['filmSim'] },
     { label: 'adjustments.basic.exposure', keys: [BasicAdjustment.Exposure] },
     { label: 'adjustments.basic.contrast', keys: [BasicAdjustment.Contrast] },
     { label: 'adjustments.basic.highlights', keys: [BasicAdjustment.Highlights] },
@@ -1134,6 +1164,7 @@ export const ADJUSTMENT_SECTIONS: Sections = {
     'toneMapper',
   ],
   curves: ['curves', 'pointCurves', 'parametricCurve', 'curveMode'],
+  film: ['filmSim'],
   color: [
     ColorAdjustment.Saturation,
     ColorAdjustment.Temperature,

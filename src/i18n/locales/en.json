@@ -10,7 +10,9 @@
         "agx": "AgX",
         "agxDesc": "Film-like Tonemapping",
         "basic": "Basic",
-        "basicDesc": "Standard Tonemapping"
+        "basicDesc": "Standard Tonemapping",
+        "film": "Film",
+        "filmDesc": "Spectral film simulation (see the Film panel)"
       },
       "reset": "Reset",
       "shadows": "Shadows",
@@ -241,6 +243,58 @@
       "size": "Size",
       "spatial": "Spatial",
       "vignette": "Vignette"
+    },
+    "film": {
+      "title": "Film Simulation",
+      "enable": "Use film simulation",
+      "stock": "Film stock",
+      "paper": "Print paper",
+      "paperAuto": "Matched paper ({{name}})",
+      "paperAutoPlain": "Matched paper",
+      "scanFilm": "Scan the film directly (no print)",
+      "filmExposure": "Film exposure",
+      "printExposure": "Print exposure",
+      "yellowShift": "Yellow filter",
+      "magentaShift": "Magenta filter",
+      "couplers": "Interlayer effects",
+      "credit": "Spectral simulation based on",
+      "kinds": {
+        "negative": "Colour negative",
+        "positive": "Slide",
+        "print": "Print",
+        "bw": "B&W"
+      },
+      "grain": "Grain",
+      "halation": "Halation",
+      "groups": {
+        "exposure": "Exposure",
+        "camera": "Camera",
+        "film": "Film",
+        "print": "Print"
+      },
+      "autoExposure": "Auto exposure",
+      "matchCameraBrightness": "Match camera brightness",
+      "matchCameraBrightnessHint": "Matches the mid-tones of the camera's own JPEG. Falls back to auto exposure when there is none.",
+      "exposureCompensation": "Exposure compensation",
+      "filmFormat": "Film format",
+      "diffusionFilter": "Diffusion filter",
+      "diffusionStrength": "Filter strength",
+      "metering": {
+        "center_weighted": "Centre-weighted",
+        "average": "Average",
+        "median": "Median",
+        "partial": "Partial (centre spot)",
+        "matrix": "Matrix",
+        "multi_zone": "Multi-zone",
+        "highlight_weighted": "Highlight-weighted"
+      },
+      "filters": {
+        "none": "None",
+        "black_pro_mist": "Black Pro-Mist",
+        "pro_mist": "Pro-Mist",
+        "glimmerglass": "Glimmerglass",
+        "cinebloom": "CineBloom"
+      }
     }
   },
   "contextMenus": {
@@ -440,7 +494,8 @@
         "color": "Color",
         "curves": "Curves",
         "details": "Details",
-        "effects": "Effects"
+        "effects": "Effects",
+        "film": "Film"
       },
       "title": "Adjustments",
       "tooltips": {
