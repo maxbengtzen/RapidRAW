@@ -43,6 +43,7 @@ mod exif_processing;
 mod export_processing;
 mod face_masking;
 mod file_management;
+mod film_look;
 mod focus_stacking;
 mod fog;
 mod formats;
@@ -221,6 +222,10 @@ pub struct WgpuTransformPayload {
     pub split_origin: [f32; 2],
     pub split_normal: [f32; 2],
     pub split_offset: [f32; 2],
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub await_present: bool,
 }
 
 fn get_or_compute_stage<T>(
@@ -516,37 +521,51 @@ async fn update_wgpu_transform(
     payload: WgpuTransformPayload,
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     viewer_window::set_viewer_background(&app_handle, payload.bg_secondary);
 
     let Some(context) = gpu_processing::current_gpu_context(&state) else {
-        return Ok(());
+        return Ok(false);
     };
 
     tokio::task::spawn_blocking(move || {
         let mut display_lock = context.display.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(display) = display_lock.as_mut() {
-            display.latest_transform.rect = [payload.x, payload.y, payload.width, payload.height];
-            display.latest_transform.clip = [
-                payload.clip_x,
-                payload.clip_y,
-                payload.clip_width,
-                payload.clip_height,
-            ];
-            display.latest_transform.window = [payload.window_width, payload.window_height];
-            display.latest_transform.bg_primary = payload.bg_primary;
-            display.latest_transform.bg_secondary = payload.bg_secondary;
-            display.latest_transform.pixelated = if payload.pixelated { 1.0 } else { 0.0 };
-            display.latest_transform.split_origin = payload.split_origin;
-            display.latest_transform.split_normal = payload.split_normal;
-            display.latest_transform.split_offset = payload.split_offset;
-            display.flush(&context.device, &context.queue);
+        let Some(display) = display_lock.as_mut() else {
+            return false;
+        };
+        let content = payload
+            .path
+            .as_deref()
+            .map(gpu_processing::display_content_key);
+        let rect_applied = display.place_editor_rect(
+            content,
+            [payload.x, payload.y, payload.width, payload.height],
+        );
+        display.latest_transform.clip = [
+            payload.clip_x,
+            payload.clip_y,
+            payload.clip_width,
+            payload.clip_height,
+        ];
+        display.latest_transform.window = [payload.window_width, payload.window_height];
+        display.latest_transform.bg_primary = payload.bg_primary;
+        display.latest_transform.bg_secondary = payload.bg_secondary;
+        display.latest_transform.pixelated = if payload.pixelated { 1.0 } else { 0.0 };
+        display.latest_transform.split_origin = payload.split_origin;
+        display.latest_transform.split_normal = payload.split_normal;
+        display.latest_transform.split_offset = payload.split_offset;
+        let presented = display.flush(&context.device, &context.queue);
+        drop(display_lock);
+        if presented && payload.await_present {
+            let _ = context.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_millis(250)),
+            });
         }
+        rect_applied && presented
     })
     .await
-    .map_err(|e| format!("Task panicked: {}", e))?;
-
-    Ok(())
+    .map_err(|e| format!("Task panicked: {}", e))
 }
 
 #[tauri::command]
@@ -580,6 +599,7 @@ struct EditorRender {
     masks: mask_generation::GeneratedMasks,
     mask_cache_key: u64,
     lut: Option<Arc<lut_processing::Lut>>,
+    film: Option<Arc<film_look::FilmLook>>,
     motion_blur: motion_blur::MotionBlurs,
 }
 
@@ -594,6 +614,7 @@ impl EditorRender {
         unscaled_crop_offset: (f32, f32),
         render: image_processing::RenderOptions,
         image_generation: usize,
+        interactive: bool,
     ) -> Self {
         let mask_definitions: Vec<MaskDefinition> = adjustments
             .get("masks")
@@ -626,6 +647,7 @@ impl EditorRender {
             lut: adjustments["lutPath"]
                 .as_str()
                 .and_then(|p| lut_processing::get_or_load_lut(state, p).ok()),
+            film: film_look::resolve(adjustments, &loaded_image.path, interactive),
             motion_blur: motion_blur::MotionBlurs::new(
                 &loaded_image.path,
                 adjustments,
@@ -642,6 +664,7 @@ impl EditorRender {
             mask_bitmaps: &self.masks.bitmaps,
             mask_cache_key: Some(self.mask_cache_key),
             lut: self.lut.clone(),
+            film: self.film.clone(),
             roi,
             hsl_probe,
             motion_blur: self.motion_blur.clone(),
@@ -696,6 +719,7 @@ async fn sample_hsl_mixer_area(
             preview.unscaled_crop_offset,
             resolve_render_options_from_handle(&app_handle, loaded_image.is_raw),
             state.load_image_generation.load(Ordering::SeqCst),
+            true,
         );
         let roi = gpu_processing::Roi {
             x: x0,
@@ -880,6 +904,7 @@ fn process_preview_job(
         unscaled_crop_offset,
         render,
         image_generation,
+        is_interactive,
     );
 
     let wants_analytics = !(is_interactive && pixel_roi.is_some()) && request_analytics;
@@ -936,6 +961,7 @@ fn process_preview_job(
                 target,
                 layer,
                 to_viewer,
+                content: gpu_processing::display_content_key(&loaded_image.path),
             }),
             analytics_config,
         );
@@ -1383,6 +1409,7 @@ async fn generate_uncropped_preview(
                 mask_bitmaps: &mask_bitmaps,
                 mask_cache_key: None,
                 lut,
+                film: crate::film_look::resolve(&adjustments_clone, &loaded_image.path, false),
                 roi: None,
                 hsl_probe: false,
                 motion_blur: crate::motion_blur::MotionBlurs::new(
@@ -1503,6 +1530,7 @@ async fn generate_preset_preview(
                 mask_bitmaps: &mask_bitmaps,
                 mask_cache_key: None,
                 lut,
+                film: crate::film_look::resolve(&js_adjustments, &loaded_image.path, false),
                 roi: None,
                 hsl_probe: false,
                 motion_blur: crate::motion_blur::MotionBlurs::new(
@@ -1704,6 +1732,7 @@ async fn generate_all_community_previews(
                             mask_bitmaps: &mask_bitmaps,
                             mask_cache_key: None,
                             lut,
+                            film: crate::film_look::resolve(js_adjustments, image_path, false),
                             roi: None,
                             hsl_probe: false,
                             motion_blur: crate::motion_blur::MotionBlurs::new(
@@ -1999,6 +2028,7 @@ async fn generate_preview_for_path(
                 mask_bitmaps: &mask_bitmaps,
                 mask_cache_key: None,
                 lut,
+                film: crate::film_look::resolve(&js_adjustments, &source_path_str, false),
                 roi: None,
                 hsl_probe: false,
                 motion_blur: crate::motion_blur::MotionBlurs::new(
@@ -2438,6 +2468,8 @@ pub fn run() {
                 });
             }
 
+            film_look::init(&app_handle);
+
             let config_dir = app_handle.path().app_config_dir().expect("Failed to get config dir");
             let crash_flag_path = config_dir.join(".gpu_init_crash_flag");
 
@@ -2575,6 +2607,9 @@ pub fn run() {
             }
 
             let window = window_builder.build().expect("Failed to build window");
+
+            #[cfg(not(target_os = "android"))]
+            app_settings::apply_saved_ui_scale(&window, &settings);
 
             #[cfg(target_os = "android")]
             android_integration::initialize_android(&window);
@@ -2802,6 +2837,7 @@ pub fn run() {
             save_hdr,
             lut_processing::load_and_parse_lut,
             lut_processing::list_luts,
+            film_look::list_film_stocks,
             lut_processing::import_luts,
             lut_processing::remove_lut,
             lut_processing::generate_lut_previews,
@@ -2824,6 +2860,7 @@ pub fn run() {
             cache_utils::clear_image_caches,
             app_settings::load_settings,
             app_settings::save_settings,
+            app_settings::set_ui_scale,
             app_settings::is_tethering_supported,
             app_settings::is_wgpu_renderer_supported,
             ai_commands::generate_ai_subject_mask,

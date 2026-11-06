@@ -1125,6 +1125,7 @@ fn process_image_for_export_pipeline(
             mask_bitmaps: &mask_bitmaps,
             mask_cache_key: None,
             lut,
+            film: crate::film_look::resolve(js_adjustments, path, false),
             roi: None,
             hsl_probe: false,
             motion_blur: crate::motion_blur::MotionBlurs::new(
@@ -1508,6 +1509,7 @@ fn export_masks_for_image(
                     mask_bitmaps: &single_bitmaps,
                     mask_cache_key: None,
                     lut: lut.clone(),
+                    film: crate::film_look::resolve(js_adjustments, source_path_str, false),
                     roi: None,
                     hsl_probe: false,
                     motion_blur: Default::default(),
@@ -1620,6 +1622,7 @@ fn export_adjustments_as_lut(
             mask_bitmaps: &[],
             mask_cache_key: None,
             lut,
+            film: crate::film_look::resolve(js_adjustments, source_path_str, false),
             roi: None,
             hsl_probe: false,
             motion_blur: Default::default(),
@@ -2446,6 +2449,7 @@ pub async fn estimate_export_sizes(
                 mask_bitmaps: &mask_bitmaps,
                 mask_cache_key: None,
                 lut,
+                film: crate::film_look::resolve(&adjustments_clone, &loaded_image.path, false),
                 roi: None,
                 hsl_probe: false,
                 motion_blur: crate::motion_blur::MotionBlurs::new(
@@ -2592,6 +2596,7 @@ pub async fn estimate_export_sizes(
                 mask_bitmaps: &mask_bitmaps,
                 mask_cache_key: None,
                 lut,
+                film: crate::film_look::resolve(&js_adjustments, &source_path_str, false),
                 roi: None,
                 hsl_probe: false,
                 motion_blur: crate::motion_blur::MotionBlurs::new(

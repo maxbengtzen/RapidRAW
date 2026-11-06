@@ -236,6 +236,32 @@ const HSL_RANGES: array<HslRange, 8> = array<HslRange, 8>(
 @group(0) @binding(14) var haze_texture: texture_2d<f32>;
 @group(0) @binding(15) var airlight_texture: texture_2d<f32>;
 
+// Film simulation ("film" tone mapper), see src-tauri/src/film_look.rs.
+struct FilmParams {
+    rgb_to_xyz_0: vec4<f32>,
+    rgb_to_xyz_1: vec4<f32>,
+    rgb_to_xyz_2: vec4<f32>,
+    curve_range: vec4<f32>,
+    density_min: vec4<f32>,
+    density_max: vec4<f32>,
+    dir_m0: vec4<f32>,
+    dir_m1: vec4<f32>,
+    dir_m2: vec4<f32>,
+    dir_density_max: vec4<f32>,
+    info: vec4<u32>,
+    grain_dmin: vec4<f32>,
+    grain_dmax: vec4<f32>,
+    grain_npp: vec4<f32>,
+    grain_ref: vec4<f32>,
+    scatter: vec4<f32>,
+    exposure: vec4<f32>,
+}
+@group(0) @binding(16) var film_tc_lut: texture_2d<f32>;
+@group(0) @binding(17) var film_curves: texture_2d<f32>;
+@group(0) @binding(18) var film_density_lut: texture_3d<f32>;
+@group(0) @binding(19) var<uniform> film: FilmParams;
+@group(0) @binding(20) var film_scatter: texture_2d<f32>;
+
 const GF_LUMA_FLOOR: f32 = 1.0e-4;
 const GF_DETAIL_SIGMA: f32 = 1.5;
 const GF_REINJECT_SIGMA: f32 = 0.8;
@@ -264,6 +290,7 @@ const GF_NOISE_HI: f32 = 0.01;
 override HIGH_PRECISION_OUTPUT: u32 = 0u;
 override FEATURES: u32 = 0xFFFFFFFFu;
 override HSL_PROBE: u32 = 0u;
+override FILM_PROBE: u32 = 0u;
 
 const F_NOISE_REDUCTION: u32 = 1u;
 const F_HSL: u32 = 2u;
@@ -277,6 +304,7 @@ const F_LUT: u32 = 256u;
 const F_CA: u32 = 512u;
 const F_AGX: u32 = 1024u;
 const F_MONOCHROME: u32 = 2048u;
+const F_FILM: u32 = 4096u;
 
 fn has_feature(f: u32) -> bool {
     return (FEATURES & f) != 0u;
@@ -1574,6 +1602,193 @@ fn agx_full_transform(color_in: vec3<f32>) -> vec3<f32> {
     return final_color;
 }
 
+// Film simulation: port of film_sim::bake::BakedFilm::apply_pixelwise.
+
+fn film_mitchell(t: f32) -> f32 {
+    let at = abs(t);
+    let b = 1.0 / 3.0;
+    let c = 1.0 / 3.0;
+    let t2 = at * at;
+    let t3 = t2 * at;
+    if (at < 1.0) {
+        return ((12.0 - 9.0 * b - 6.0 * c) * t3 + (-18.0 + 12.0 * b + 6.0 * c) * t2 + (6.0 - 2.0 * b)) / 6.0;
+    } else if (at < 2.0) {
+        return ((-b - 6.0 * c) * t3 + (6.0 * b + 30.0 * c) * t2 + (-12.0 * b - 48.0 * c) * at + (8.0 * b + 24.0 * c)) / 6.0;
+    }
+    return 0.0;
+}
+
+fn film_reflect(i: i32, n: i32) -> i32 {
+    var idx = abs(i);
+    let period = 2 * (n - 1);
+    if (period > 0) {
+        idx = idx % period;
+        if (idx >= n) {
+            idx = period - idx;
+        }
+    } else {
+        idx = 0;
+    }
+    return clamp(idx, 0, n - 1);
+}
+
+fn film_tc_sample(lut_x: f32, lut_y: f32) -> vec3<f32> {
+    let n = i32(film.info.x);
+    let max_xy = f32(n - 1);
+    let xf = clamp(lut_x, 0.0, max_xy);
+    let yf = clamp(lut_y, 0.0, max_xy);
+    let xi = min(i32(floor(xf)), n - 2);
+    let yi = min(i32(floor(yf)), n - 2);
+    let fx = xf - f32(xi);
+    let fy = yf - f32(yi);
+    var sum = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var dy = 0; dy < 4; dy++) {
+        let sy = film_reflect(yi + dy - 1, n);
+        let wy = film_mitchell(fy - f32(dy - 1));
+        for (var dx = 0; dx < 4; dx++) {
+            let sx = film_reflect(xi + dx - 1, n);
+            let w = film_mitchell(fx - f32(dx - 1)) * wy;
+            wsum += w;
+            sum += w * textureLoad(film_tc_lut, vec2<i32>(sx, sy), 0).rgb;
+        }
+    }
+    if (wsum != 0.0) {
+        sum /= wsum;
+    }
+    return sum;
+}
+
+fn film_front(rgb: vec3<f32>) -> vec3<f32> {
+    let xyz = vec3<f32>(
+        dot(film.rgb_to_xyz_0.xyz, rgb),
+        dot(film.rgb_to_xyz_1.xyz, rgb),
+        dot(film.rgb_to_xyz_2.xyz, rgb),
+    );
+    let b = xyz.x + xyz.y + xyz.z;
+    if (b <= 1e-10) {
+        return vec3<f32>(0.0);
+    }
+    let xc = xyz.x / b;
+    let yc = xyz.y / b;
+    let omx = max(1.0 - xc, 1e-10);
+    let tx = clamp((1.0 - xc) * (1.0 - xc), 0.0, 1.0);
+    let ty = clamp(yc / omx, 0.0, 1.0);
+    let scale = f32(film.info.x - 1u);
+    return film_tc_sample(ty * scale, tx * scale) * b;
+}
+
+fn film_curve(row: i32, x: vec3<f32>, x_min: f32, x_max: f32) -> vec3<f32> {
+    let n = i32(textureDimensions(film_curves).x);
+    let t = clamp((x - vec3<f32>(x_min)) / (x_max - x_min), vec3<f32>(0.0), vec3<f32>(1.0)) * f32(n - 1);
+    var out: vec3<f32>;
+    for (var c = 0; c < 3; c++) {
+        let i0 = min(i32(floor(t[c])), n - 2);
+        let f = t[c] - f32(i0);
+        let a = textureLoad(film_curves, vec2<i32>(i0, row), 0)[c];
+        let b = textureLoad(film_curves, vec2<i32>(i0 + 1, row), 0)[c];
+        out[c] = mix(a, b, f);
+    }
+    return out;
+}
+
+fn film_density_lut_sample(d: vec3<f32>) -> vec3<f32> {
+    let n = i32(film.info.y);
+    let t = clamp((d - film.density_min.xyz) / (film.density_max.xyz - film.density_min.xyz), vec3<f32>(0.0), vec3<f32>(1.0)) * f32(n - 1);
+    let i0 = min(vec3<i32>(floor(t)), vec3<i32>(n - 2));
+    let f = t - vec3<f32>(i0);
+    var out = vec3<f32>(0.0);
+    for (var k = 0; k < 8; k++) {
+        let o = vec3<i32>(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+        let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1) * select(1.0 - f.z, f.z, o.z == 1);
+        out += w * textureLoad(film_density_lut, i0 + o, 0).rgb;
+    }
+    return out;
+}
+
+fn film_pcg(state: u32) -> u32 {
+    let s = state * 747796405u + 2891336453u;
+    let word = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn film_pixel_normal(coord: vec2<i32>, channel: u32) -> f32 {
+    let h1 = film_pcg(bitcast<u32>(coord.x) ^ film_pcg(bitcast<u32>(coord.y) ^ film_pcg(channel + 0x9e3779b9u)));
+    let h2 = film_pcg(h1);
+    let u1 = max(f32(h1) * (1.0 / 4294967296.0), 1e-7);
+    let u2 = f32(h2) * (1.0 / 4294967296.0);
+    return sqrt(-2.0 * log(u1)) * cos(6.28318530717958647 * u2);
+}
+
+fn film_grain_noise(coord: vec2<i32>, channel: u32) -> f32 {
+    const W0: f32 = 0.38466;
+    const W1: f32 = 0.11778;
+    const W2: f32 = 0.03606;
+    var sum = 0.0;
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let d2 = dx * dx + dy * dy;
+            let w = select(select(W2, W1, d2 == 1), W0, d2 == 0);
+            sum += w * film_pixel_normal(coord + vec2<i32>(dx, dy), channel);
+        }
+    }
+    return sum;
+}
+
+fn film_apply_grain(density: vec3<f32>, coord: vec2<i32>, render_long_edge: f32) -> vec3<f32> {
+    let amount = film.grain_dmin.w;
+    let n_sub = film.grain_dmax.w;
+    let mono = film.grain_npp.w > 0.5;
+    let px = film.grain_ref.w / render_long_edge;
+    let npp = film.grain_npp.xyz * px * px;
+    var out = density;
+    for (var c = 0; c < 3; c++) {
+        let dmin = film.grain_dmin[c];
+        let dmax = film.grain_dmax[c];
+        let p = clamp((density[c] + dmin) / dmax, 1e-6, 1.0 - 1e-6);
+        let sat = 1.0 - p * film.grain_ref[c] * (1.0 - 1e-6);
+        let sd = dmax * sqrt(p * sat / (max(npp[c], 1e-3) * n_sub));
+        let z = film_grain_noise(coord, select(u32(c), 0u, mono));
+        out[c] = density[c] + amount * sd * z;
+    }
+    return out;
+}
+
+fn film_scatter_sample(uv: vec2<f32>) -> vec3<f32> {
+    let dims = vec2<i32>(textureDimensions(film_scatter));
+    let p = clamp(uv * vec2<f32>(dims) - 0.5, vec2<f32>(0.0), vec2<f32>(dims - 1));
+    let i0 = vec2<i32>(floor(p));
+    let i1 = min(i0 + 1, dims - 1);
+    let f = p - vec2<f32>(i0);
+    let a = textureLoad(film_scatter, i0, 0).rgb;
+    let b = textureLoad(film_scatter, vec2<i32>(i1.x, i0.y), 0).rgb;
+    let c = textureLoad(film_scatter, vec2<i32>(i0.x, i1.y), 0).rgb;
+    let d = textureLoad(film_scatter, i1, 0).rgb;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+fn film_transform(rgb: vec3<f32>, uv: vec2<f32>, scatter_exposure: f32, coord: vec2<i32>, render_long_edge: f32) -> vec3<f32> {
+    var raw = film_front(rgb);
+    if (film.scatter.w > 0.5) {
+        raw = raw * film.scatter.xyz + film_scatter_sample(uv) * scatter_exposure;
+    }
+    raw *= film.exposure.x;
+    let log_raw = log(max(raw, vec3<f32>(0.0)) + vec3<f32>(1e-10)) / log(10.0);
+    var density = film_curve(0, log_raw, film.curve_range.x, film.curve_range.y);
+    if (film.info.z == 1u) {
+        var silver = density;
+        if (film.info.w == 1u) {
+            silver = film.dir_density_max.xyz - density;
+        }
+        let correction = silver.x * film.dir_m0.xyz + silver.y * film.dir_m1.xyz + silver.z * film.dir_m2.xyz;
+        density = film_curve(1, log_raw - correction, film.curve_range.z, film.curve_range.w);
+    }
+    if (film.grain_dmin.w > 0.0) {
+        density = film_apply_grain(density, coord, render_long_edge);
+    }
+    return film_density_lut_sample(density);
+}
+
 fn legacy_tonemap(c: vec3<f32>) -> vec3<f32> {
     const a: f32 = 2.51;
     const b: f32 = 0.03;
@@ -2120,8 +2335,21 @@ fn main(
         }
     }
 
+    if (FILM_PROBE == 1u) {
+        textureStore(output_texture, id.xy, vec4<f32>(max(composite_rgb_linear, vec3<f32>(0.0)), 1.0));
+        return;
+    }
+
     var default_tonemapped: vec3<f32>;
-    if (has_feature(F_AGX) && adjustments.global.tonemapper_mode == 1u) {
+    if (has_feature(F_FILM) && adjustments.global.tonemapper_mode == 2u) {
+        default_tonemapped = film_transform(
+            composite_rgb_linear,
+            (vec2<f32>(absolute_coord) + 0.5) / full_dims,
+            exp2(adjustments.global.exposure),
+            absolute_coord_i,
+            max(full_dims.x, full_dims.y)
+        );
+    } else if (has_feature(F_AGX) && adjustments.global.tonemapper_mode == 1u) {
         default_tonemapped = agx_full_transform(composite_rgb_linear);
     } else if (is_raw == 1u) {
         var srgb_emulated = linear_to_srgb(composite_rgb_linear);
