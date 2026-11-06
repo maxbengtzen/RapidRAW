@@ -37,6 +37,7 @@ pub struct RenderRequest<'a> {
     pub mask_bitmaps: &'a [ImageBuffer<Luma<u8>, Vec<u8>>],
     pub mask_cache_key: Option<u64>,
     pub lut: Option<Arc<Lut>>,
+    pub film: Option<Arc<crate::film_look::FilmLook>>,
     pub roi: Option<Roi>,
     pub hsl_probe: bool,
     pub motion_blur: crate::motion_blur::MotionBlurs,
@@ -960,7 +961,7 @@ pub fn get_or_init_gpu_context(
     Ok(new_context)
 }
 
-fn read_texture_data_roi(
+pub(crate) fn read_texture_data_roi(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
@@ -1102,6 +1103,7 @@ pub struct GpuProcessor {
     motion_cache: std::sync::Mutex<Vec<(u64, Arc<MotionBlurred>)>>,
     motion_grain: std::sync::Mutex<Vec<(u64, f32)>>,
     lut_cache: std::sync::Mutex<Option<LutCache>>,
+    film: crate::film_look::FilmRenderer,
     ping_pong_view: wgpu::TextureView,
     sharpness_blur_view: wgpu::TextureView,
     tonal_blur_view: wgpu::TextureView,
@@ -1245,6 +1247,7 @@ const F_LUT: u32 = 256;
 const F_CA: u32 = 512;
 const F_AGX: u32 = 1024;
 const F_MONOCHROME: u32 = 2048;
+const F_FILM: u32 = 4096;
 
 fn shader_features(adjustments: &AllAdjustments) -> u32 {
     let g = &adjustments.global;
@@ -1291,6 +1294,10 @@ fn shader_features(adjustments: &AllAdjustments) -> u32 {
             || g.chromatic_aberration_blue_yellow.abs() > 0.000001,
     );
     set(F_AGX, g.tonemapper_mode == 1);
+    set(
+        F_FILM,
+        g.tonemapper_mode == crate::film_look::TONEMAPPER_MODE_FILM,
+    );
     set(F_MONOCHROME, g.monochrome.enabled == 1);
     features
 }
@@ -1378,6 +1385,7 @@ pub struct GpuPipelines {
     high_precision_entries: Vec<wgpu::BindGroupLayoutEntry>,
     high_precision_pipeline: std::sync::OnceLock<HighPrecisionPipeline>,
     hsl_probe_pipeline: std::sync::OnceLock<wgpu::ComputePipeline>,
+    film_probe_pipeline: std::sync::OnceLock<wgpu::ComputePipeline>,
     dummy_blur_view: wgpu::TextureView,
     dummy_lut_view: wgpu::TextureView,
     dummy_lut_sampler: wgpu::Sampler,
@@ -1695,6 +1703,8 @@ impl GpuPipelines {
             });
         }
 
+        bind_group_layout_entries.extend(crate::film_look::layout_entries());
+
         let main_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Main BGL"),
             entries: &bind_group_layout_entries,
@@ -1791,6 +1801,7 @@ impl GpuPipelines {
             high_precision_entries: bind_group_layout_entries,
             high_precision_pipeline: std::sync::OnceLock::new(),
             hsl_probe_pipeline: std::sync::OnceLock::new(),
+            film_probe_pipeline: std::sync::OnceLock::new(),
             dummy_blur_view,
             dummy_lut_view,
             dummy_lut_sampler,
@@ -1801,6 +1812,7 @@ impl GpuPipelines {
 
 impl GpuProcessor {
     pub fn new(context: GpuContext, max_width: u32, max_height: u32) -> Result<Self, String> {
+        let film = crate::film_look::FilmRenderer::new(&context.device, &context.queue);
         let device = &context.device;
         let pipelines = Arc::clone(
             context
@@ -1895,6 +1907,7 @@ impl GpuProcessor {
             motion_cache: std::sync::Mutex::new(Vec::new()),
             motion_grain: std::sync::Mutex::new(Vec::new()),
             lut_cache: std::sync::Mutex::new(None),
+            film,
             ping_pong_view,
             sharpness_blur_view,
             tonal_blur_view,
@@ -2643,6 +2656,57 @@ impl GpuProcessor {
         })
     }
 
+    fn film_probe_pipeline(&self) -> &wgpu::ComputePipeline {
+        self.pipelines.film_probe_pipeline.get_or_init(|| {
+            let hp = self.high_precision_pipeline();
+            self.context
+                .device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("Film Probe Pipeline"),
+                    layout: Some(&hp.layout),
+                    module: &hp.shader,
+                    entry_point: Some("main"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[("HIGH_PRECISION_OUTPUT", 1.0), ("FILM_PROBE", 1.0)],
+                        ..Default::default()
+                    },
+                    cache: None,
+                })
+        })
+    }
+
+    fn film_probe(
+        &self,
+        input: &GpuImageEntry,
+        mask_texture_view: &wgpu::TextureView,
+        request: &RenderRequest,
+    ) -> Result<crate::film_look::Proxy, String> {
+        let probe = RenderRequest {
+            adjustments: request.adjustments,
+            mask_bitmaps: request.mask_bitmaps,
+            mask_cache_key: request.mask_cache_key,
+            lut: request.lut.clone(),
+            film: None,
+            roi: None,
+            hsl_probe: false,
+            motion_blur: request.motion_blur.clone(),
+        };
+        let (pixels, width, height, _, _) = self.run_inner(
+            input,
+            mask_texture_view,
+            probe,
+            false,
+            RenderOutputPrecision::SixteenBit,
+            true,
+        )?;
+        match pixels {
+            RenderedPixels::U16(bits) => {
+                Ok(crate::film_look::Proxy::from_f16_bits(&bits, width, height))
+            }
+            RenderedPixels::U8(_) => Err("film probe returned 8-bit pixels".into()),
+        }
+    }
+
     fn high_precision_tile(&self) -> &HighPrecisionTile {
         self.high_precision_tile.get_or_init(|| {
             let texture = self
@@ -2695,6 +2759,25 @@ impl GpuProcessor {
         output_to_display: bool,
         output_precision: RenderOutputPrecision,
     ) -> Result<(RenderedPixels, u32, u32, u32, u32), String> {
+        self.run_inner(
+            input,
+            mask_texture_view,
+            request,
+            output_to_display,
+            output_precision,
+            false,
+        )
+    }
+
+    fn run_inner(
+        &self,
+        input: &GpuImageEntry,
+        mask_texture_view: &wgpu::TextureView,
+        request: RenderRequest,
+        output_to_display: bool,
+        output_precision: RenderOutputPrecision,
+        film_probe: bool,
+    ) -> Result<(RenderedPixels, u32, u32, u32, u32), String> {
         let input_texture_view = &input.texture_view;
         let gf_coeffs_view = &input.gf_coeffs_view;
         let gf_structure_view = &input.gf_structure_view;
@@ -2717,12 +2800,34 @@ impl GpuProcessor {
         } else {
             None
         };
-        let output_pipeline = if request.hsl_probe {
+        let mut request_adjustments = request.adjustments;
+        let film_bindings = match &request.film {
+            Some(look) if !film_probe => self.film.prepare(
+                device,
+                queue,
+                look,
+                input,
+                &request_adjustments,
+                request.mask_cache_key,
+                || self.film_probe(input, mask_texture_view, &request),
+            ),
+            _ => {
+                if request_adjustments.global.tonemapper_mode
+                    == crate::film_look::TONEMAPPER_MODE_FILM
+                {
+                    request_adjustments.global.tonemapper_mode = 0;
+                }
+                self.film.dummy()
+            }
+        };
+        let output_pipeline = if film_probe {
+            self.film_probe_pipeline().clone()
+        } else if request.hsl_probe {
             self.hsl_probe_pipeline().clone()
         } else {
             self.main_pipeline_for(
                 high_precision_tile.is_some(),
-                shader_features(&request.adjustments),
+                shader_features(&request_adjustments),
             )
         };
         let (output_bgl, output_tile_texture, output_tile_view, bytes_per_pixel) =
@@ -2759,7 +2864,7 @@ impl GpuProcessor {
             ),
         };
 
-        let adjustments = request.adjustments;
+        let adjustments = request_adjustments;
         let light = match crate::light_effects::LightJob::new(input.id, &adjustments) {
             Some(job) => Some(self.light_maps(input, job)?),
             None => None,
@@ -3021,6 +3126,7 @@ impl GpuProcessor {
                     binding: 14 + MAX_MASK_BINDINGS,
                     resource: wgpu::BindingResource::TextureView(airlight_view),
                 });
+                bind_group_entries.extend(film_bindings.bind_group_entries());
 
                 let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Tile Bind Group"),
@@ -3223,6 +3329,9 @@ fn process_and_get_dynamic_image_inner(
     }
 
     let is_raw = request.adjustments.global.is_raw_image;
+    if let Some(look) = &request.film {
+        crate::film_look::ensure_camera_placement(look, source.image, is_raw != 0);
+    }
     let identity = source.identity();
     let transform_key = source.key();
     let matches = |e: &GpuImageEntry| {

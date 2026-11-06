@@ -641,6 +641,7 @@ fn render_lut_swatch(
             mask_bitmaps: &[],
             mask_cache_key: None,
             lut: Some(lut),
+            film: None,
             roi: None,
             hsl_probe: false,
             motion_blur: Default::default(),
