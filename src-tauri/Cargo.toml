@@ -31,6 +31,7 @@ bytemuck = { version = "1.25", features = ["derive"] }
 anyhow = "1.0.104"
 kamadak-exif = "0.6.1"
 rawler = { git = "https://github.com/CyberTimon/RapidRAW-DngLab.git" }
+film-sim = { path = "film-sim" }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1.25", features = ["v4", "serde"] }
 walkdir = "2.5.0"

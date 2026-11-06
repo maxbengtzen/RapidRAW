@@ -1839,6 +1839,7 @@ fn generate_thumbnail_data_with_metadata(
                 mask_bitmaps: &mask_bitmaps,
                 mask_cache_key: None,
                 lut,
+                film: crate::film_look::resolve(&meta.adjustments, &source_path_str, false),
                 roi: None,
                 hsl_probe: false,
                 motion_blur: crate::motion_blur::MotionBlurs::new(
