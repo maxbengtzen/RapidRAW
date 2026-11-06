@@ -1,0 +1,12 @@
+Changes to spektrafilm profiles and LUTs shipped with RapidRAW film-sim
+=======================================================================
+
+Source: spektrafilm by Andrea Volpato, https://github.com/andreavolpato/spektrafilm
+        (via spektrafilm-rs commit 9dd59b0380194b93686aaa230a8bb9680aa270a4)
+License: CC BY-SA 4.0 (see SPEKTRAFILM_LICENSE.txt)
+
+2026-11-06  Copied unmodified.
+2026-11-06  Removed luts/spectral_upsampling/arctic2026alpha02/ and
+            luts/spectral_upsampling/hanatos_irradiance_xy_coeffs_250304.lut
+            (spectral upsamplers RapidRAW does not use). The remaining
+            files are unmodified.
