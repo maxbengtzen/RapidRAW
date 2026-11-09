@@ -43,6 +43,7 @@ mod exif_processing;
 mod export_processing;
 mod face_masking;
 mod file_management;
+mod film_look;
 mod focus_stacking;
 mod fog;
 mod formats;
@@ -599,6 +600,7 @@ struct EditorRender {
     masks: mask_generation::GeneratedMasks,
     mask_cache_key: u64,
     lut: Option<Arc<lut_processing::Lut>>,
+    film: Option<Arc<film_look::FilmLook>>,
     motion_blur: motion_blur::MotionBlurs,
 }
 
@@ -613,6 +615,7 @@ impl EditorRender {
         unscaled_crop_offset: (f32, f32),
         render: image_processing::RenderOptions,
         image_generation: usize,
+        interactive: bool,
     ) -> Self {
         let mask_definitions: Vec<MaskDefinition> = adjustments
             .get("masks")
@@ -645,6 +648,7 @@ impl EditorRender {
             lut: adjustments["lutPath"]
                 .as_str()
                 .and_then(|p| lut_processing::get_or_load_lut(state, p).ok()),
+            film: film_look::resolve(adjustments, &loaded_image.path, interactive),
             motion_blur: motion_blur::MotionBlurs::new(
                 &loaded_image.path,
                 adjustments,
@@ -661,6 +665,7 @@ impl EditorRender {
             mask_bitmaps: &self.masks.bitmaps,
             mask_cache_key: Some(self.mask_cache_key),
             lut: self.lut.clone(),
+            film: self.film.clone(),
             roi,
             hsl_probe,
             motion_blur: self.motion_blur.clone(),
@@ -715,6 +720,7 @@ async fn sample_hsl_mixer_area(
             preview.unscaled_crop_offset,
             resolve_render_options_from_handle(&app_handle, loaded_image.is_raw),
             state.load_image_generation.load(Ordering::SeqCst),
+            true,
         );
         let roi = gpu_processing::Roi {
             x: x0,
@@ -899,6 +905,7 @@ fn process_preview_job(
         unscaled_crop_offset,
         render,
         image_generation,
+        is_interactive,
     );
 
     let wants_analytics = !(is_interactive && pixel_roi.is_some()) && request_analytics;
@@ -1403,6 +1410,7 @@ async fn generate_uncropped_preview(
                 mask_bitmaps: &mask_bitmaps,
                 mask_cache_key: None,
                 lut,
+                film: crate::film_look::resolve(&adjustments_clone, &loaded_image.path, false),
                 roi: None,
                 hsl_probe: false,
                 motion_blur: crate::motion_blur::MotionBlurs::new(
@@ -1523,6 +1531,7 @@ async fn generate_preset_preview(
                 mask_bitmaps: &mask_bitmaps,
                 mask_cache_key: None,
                 lut,
+                film: crate::film_look::resolve(&js_adjustments, &loaded_image.path, false),
                 roi: None,
                 hsl_probe: false,
                 motion_blur: crate::motion_blur::MotionBlurs::new(
@@ -1724,6 +1733,7 @@ async fn generate_all_community_previews(
                             mask_bitmaps: &mask_bitmaps,
                             mask_cache_key: None,
                             lut,
+                            film: crate::film_look::resolve(js_adjustments, image_path, false),
                             roi: None,
                             hsl_probe: false,
                             motion_blur: crate::motion_blur::MotionBlurs::new(
@@ -2026,6 +2036,7 @@ async fn generate_preview_for_path(
                 mask_bitmaps: &mask_bitmaps,
                 mask_cache_key: None,
                 lut,
+                film: crate::film_look::resolve(&js_adjustments, &source_path_str, false),
                 roi: None,
                 hsl_probe: false,
                 motion_blur: crate::motion_blur::MotionBlurs::new(
@@ -2465,6 +2476,8 @@ pub fn run() {
                 });
             }
 
+            film_look::init(&app_handle);
+
             let config_dir = app_handle.path().app_config_dir().expect("Failed to get config dir");
             let crash_flag_path = config_dir.join(".gpu_init_crash_flag");
 
@@ -2833,6 +2846,7 @@ pub fn run() {
             save_hdr,
             lut_processing::load_and_parse_lut,
             lut_processing::list_luts,
+            film_look::list_film_stocks,
             lut_processing::import_luts,
             lut_processing::remove_lut,
             lut_processing::generate_lut_previews,

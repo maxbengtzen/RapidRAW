@@ -188,6 +188,14 @@ pub fn effective_baseline_exposure(
     }
 }
 
+pub fn user_exposure_ev(adjustments: &Value) -> f32 {
+    if is_tool_active(adjustments, "basic") {
+        adjustments["exposure"].as_f64().unwrap_or(0.0) as f32 / SCALES.exposure
+    } else {
+        0.0
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub struct Crop {
     pub x: f64,
@@ -2550,8 +2558,12 @@ fn get_global_adjustments_from_json(
         has_lut,
         lut_intensity,
 
-        tonemapper_mode: tonemapper_override
-            .unwrap_or_else(|| if tone_mapper == "agx" { 1 } else { 0 }),
+        // The film tone mapper is a per-image choice; the default override keeps it.
+        tonemapper_mode: if tone_mapper == "film" && is_visible("film") {
+            crate::film_look::TONEMAPPER_MODE_FILM
+        } else {
+            tonemapper_override.unwrap_or_else(|| if tone_mapper == "agx" { 1 } else { 0 })
+        },
         lut_is_scene_referred,
         vignette_center_x: get_val("vignette", "vignetteCenterX", 1.0, Some(0.5)),
         vignette_center_y: get_val("vignette", "vignetteCenterY", 1.0, Some(0.5)),
